@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+src-tauri/target/
+
+# Release packages belong in GitHub Releases after licensing review, not in source commits.
+*.exe
+*.msi
+*.nsis.zip
+
+# Private planning/history and local copies of source artwork.
+/Original Docs deleted.md
+/Transcription Doc.md
+/Forest Green Media Download Icon.png
+
+# Temporary icon inspection artifacts.
+/.built-app-icon.png
+/.exe-icon-0.png
+/.installed-app-icon.png
+
+# Local environment files; allow committed examples.
+.env
+.env.*
+!.env.example
+
+# Local transcription evaluation media, references, raw outputs, and reports
+tools/transcription_bench/data/
+tools/transcription_bench/runs/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
