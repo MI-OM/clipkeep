@@ -18,9 +18,10 @@ if (Object.values(versions).some((version) => !version) || new Set(Object.values
   process.exit(1);
 }
 
-const tag = process.env.GITHUB_REF_NAME;
-if (tag && tag !== `v${packageJson.version}`) {
-  console.error(`Release tag ${tag} does not match version v${packageJson.version}.`);
+const refType = process.env.GITHUB_REF_TYPE;
+const refName = process.env.GITHUB_REF_NAME;
+if (refType === "tag" && refName !== `v${packageJson.version}`) {
+  console.error(`Release tag ${refName} does not match version v${packageJson.version}.`);
   process.exit(1);
 }
 
