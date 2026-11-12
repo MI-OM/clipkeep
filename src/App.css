@@ -1425,7 +1425,12 @@ select:focus-visible {
   gap: 12px;
 }
 
+.job-title-row > div {
+  min-width: 0;
+}
+
 .job-title-row h3 {
+  overflow-wrap: anywhere;
   margin: 1px 0 4px;
   color: #3b473e;
   font-size: 11px;

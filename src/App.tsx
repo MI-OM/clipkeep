@@ -86,6 +86,7 @@ function App() {
   const [announcement, setAnnouncement] = useState("");
   const [isStarting, setIsStarting] = useState(false);
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
+  const previewRequestRef = useRef(0);
   const service = useMemo(() => createDownloadService(), []);
   const desktopRuntime = isTauri();
   const activeJobs = jobs.filter(
@@ -195,12 +196,22 @@ function App() {
       if (!validation.valid) {
         throw new Error(validation.message);
       }
+      const requestId = ++previewRequestRef.current;
       const result = await service.getMetadata(validation.normalizedUrl);
-      setMetadata(result);
+      // Ignore a preview that finished after the link was edited or cleared, so its title and
+      // quality list are never applied to a different link.
+      if (requestId === previewRequestRef.current) {
+        setMetadata(result);
+      }
       return result;
     },
     [service],
   );
+
+  const onMetadataClear = useCallback(() => {
+    previewRequestRef.current += 1;
+    setMetadata(null);
+  }, []);
 
   const onRetry = useCallback(
     (job: DownloadJob) => {
@@ -342,16 +353,17 @@ function App() {
               onStart={onStart}
               onCancel={onCancel}
               onPreview={onPreview}
-              onMetadataClear={() => setMetadata(null)}
+              onMetadataClear={onMetadataClear}
               onChooseFolderError={setSettingsNotice}
             />
           )}
           {page === "downloads" && (
             <DownloadsPage jobs={jobs} onCancel={onCancel} onRetry={onRetry} />
           )}
-          {page === "transcription" && (
+          {/* Kept mounted so a running or finished transcript survives switching pages. */}
+          <div hidden={page !== "transcription"}>
             <TranscribePage />
-          )}
+          </div>
           {page === "settings" && (
             <SettingsPage
               settings={settings}

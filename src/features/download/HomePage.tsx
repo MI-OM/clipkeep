@@ -202,6 +202,8 @@ export function HomePage({
                 onClick={() => {
                   setUrl("");
                   setValidationError("");
+                  setMetadataError("");
+                  onMetadataClear();
                 }}
               >
                 <X size={15} />

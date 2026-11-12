@@ -120,8 +120,12 @@ function JobCard({
       <div className="job-main">
         <div className="job-title-row">
           <div>
-            <h3>{job.format === "mp4" ? "MP4 video" : "MP3 audio"} · {job.quality === "best" ? "Best available" : job.quality}</h3>
-            <p>{new Date(job.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+            <h3>{job.title ?? (job.format === "mp4" ? "MP4 video" : "MP3 audio")}</h3>
+            <p>
+              {job.format === "mp4" ? "MP4 video" : "MP3 audio"} · {job.quality === "best" ? "Best available" : job.quality}
+              {" · "}
+              {new Date(job.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </p>
           </div>
           <span className={`job-status ${failed ? "status-failed" : cancelled ? "status-cancelled" : active ? "status-active" : "status-complete"}`}>
             {failed ? <AlertCircle size={14} /> : cancelled ? <X size={14} /> : active ? <Clock3 size={14} /> : <CheckCircle2 size={14} />}

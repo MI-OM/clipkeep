@@ -462,20 +462,7 @@ fn run_download_inner(
                 ));
             }
             validate_media_output(&tools.ffprobe, staged_output, format)?;
-            if let Err(error) = fs::hard_link(staged_output, final_output) {
-                let (code, message) = if error.kind() == io::ErrorKind::AlreadyExists {
-                    (
-                        "file_exists",
-                        "A file with this video ID already exists. Choose another save folder.",
-                    )
-                } else {
-                    (
-                        "output_finalize_failed",
-                        "The validated file could not be safely finalized in the save folder.",
-                    )
-                };
-                return Err(AppError::new(code, message, true));
-            }
+            finalize_output(staged_output, final_output)?;
             Ok(Some(final_output.to_string_lossy().into_owned()))
         }
         Ok(DownloadStatus::Cancelled) => Ok(None),
@@ -876,6 +863,50 @@ fn mp4_qualities(formats: &[serde_json::Value]) -> Vec<Quality> {
     result
 }
 
+/// Publishes the validated staged file without ever overwriting an existing file. A hard link is
+/// tried first; FAT32/exFAT drives and many network shares do not support hard links, so those
+/// fall back to copying into a newly created file.
+fn finalize_output(staged: &Path, final_output: &Path) -> Result<(), AppError> {
+    let file_exists = || {
+        AppError::new(
+            "file_exists",
+            "A file with this title already exists. Choose another save folder.",
+            true,
+        )
+    };
+    let finalize_failed = || {
+        AppError::new(
+            "output_finalize_failed",
+            "The validated file could not be safely finalized in the save folder.",
+            true,
+        )
+    };
+    match fs::hard_link(staged, final_output) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(file_exists()),
+        Err(_) => {}
+    }
+
+    let mut output = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_output)
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(file_exists()),
+        Err(_) => return Err(finalize_failed()),
+    };
+    let copied = fs::File::open(staged)
+        .and_then(|mut input| io::copy(&mut input, &mut output))
+        .and_then(|_| output.sync_all());
+    if copied.is_err() {
+        drop(output);
+        let _ = fs::remove_file(final_output);
+        return Err(finalize_failed());
+    }
+    Ok(())
+}
+
 fn ensure_output_available(path: &Path) -> Result<(), AppError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(AppError::new(
@@ -1119,7 +1150,8 @@ mod tests {
 
     use super::{
         AppError, DownloadRequest, MAX_FILENAME_UTF16_UNITS, MediaFormat, Quality, TempWorkspace,
-        download_arguments, ensure_output_available, is_valid_media_probe, metadata_arguments,
+        download_arguments, ensure_output_available, finalize_output, is_valid_media_probe,
+        metadata_arguments,
         mp3_qualities, mp4_qualities, parse_progress, parse_speed, parse_time,
         resolve_output_title, sanitize_filename,
     };
@@ -1312,6 +1344,28 @@ mod tests {
             ensure_output_available(&output).unwrap_err().code,
             "file_exists"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn finalize_publishes_staged_file_without_overwriting() {
+        let directory =
+            std::env::temp_dir().join(format!("clipkeep-finalize-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let staged = directory.join("media.mp4");
+        let output = directory.join("video.mp4");
+        fs::write(&staged, b"validated").unwrap();
+
+        finalize_output(&staged, &output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"validated");
+
+        let replacement = directory.join("replacement.mp4");
+        fs::write(&replacement, b"replacement").unwrap();
+        assert_eq!(
+            finalize_output(&replacement, &output).unwrap_err().code,
+            "file_exists"
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"validated");
         fs::remove_dir_all(directory).unwrap();
     }
 

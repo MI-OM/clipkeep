@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    ops::Range,
     path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, TryLockError},
@@ -40,6 +41,8 @@ const WHISPER_REPOSITORY: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-
 const WHISPER_BASE_ID: &str = "whisper-base-en-int8";
 const WHISPER_BASE_DIR: &str = "whisper-base-en-int8";
 const WHISPER_BASE_REPOSITORY: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/8c8c1656435deee77c31d4b4f37b6fa0ef711c15";
+const WHISPER_MIN_CHUNK_SECONDS: usize = 20;
+const WHISPER_MAX_CHUNK_SECONDS: usize = 28;
 static MODEL_INSTALL_LOCK: Mutex<()> = Mutex::new(());
 static TRANSCRIPTION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -232,8 +235,6 @@ fn model_status(root: &Path) -> TranscriptionStatus {
             LARGE_ID
         } else if total_ram_mb >= 8 * 1024 && available_ram_mb >= 1536 {
             WHISPER_BASE_ID
-        } else if total_ram_mb >= 8 * 1024 && whisper_can_run {
-            WHISPER_ID
         } else {
             WHISPER_ID
         };
@@ -1008,7 +1009,13 @@ fn transcribe(
     })?;
     let wav_path = temp_dir.join(format!("{}.wav", Uuid::new_v4()));
     let _cleanup = TempFile(wav_path.clone());
-    let conversion = Command::new(ffmpeg)
+    let mut conversion = Command::new(ffmpeg);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        conversion.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let conversion = conversion
         .args(["-nostdin", "-v", "error", "-y", "-i"])
         .arg(&source)
         .args([
@@ -1156,16 +1163,37 @@ fn transcribe(
             true,
         )
     })?;
-    let stream = recognizer.create_stream();
-    stream.accept_waveform(wave.sample_rate(), wave.samples());
-    recognizer.decode(&stream);
-    let result = stream.get_result().ok_or_else(|| {
-        AppError::new(
-            "transcription_failed",
-            "The transcription engine did not return a result.",
-            true,
+    let samples = wave.samples();
+    let sample_rate = wave.sample_rate();
+    // sherpa-onnx's offline Whisper decoder keeps only the first 30 seconds of a stream and
+    // silently discards the rest, so Whisper audio is decoded in shorter, silence-aligned chunks.
+    let ranges = if model_id == WHISPER_ID || model_id == WHISPER_BASE_ID {
+        chunk_ranges(
+            samples,
+            usize::try_from(sample_rate).unwrap_or(16_000),
+            WHISPER_MIN_CHUNK_SECONDS,
+            WHISPER_MAX_CHUNK_SECONDS,
         )
-    })?;
+    } else {
+        vec![0..samples.len()]
+    };
+    let mut segments = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(sample_rate, &samples[range]);
+        recognizer.decode(&stream);
+        let result = stream.get_result().ok_or_else(|| {
+            AppError::new(
+                "transcription_failed",
+                "The transcription engine did not return a result.",
+                true,
+            )
+        })?;
+        let text = result.text.trim();
+        if !text.is_empty() {
+            segments.push(text.to_string());
+        }
+    }
     let title = source
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1174,11 +1202,50 @@ fn transcribe(
     Ok(TranscriptResult {
         source_path: source.to_string_lossy().into_owned(),
         title,
-        text: result.text,
+        text: segments.join(" "),
         duration_seconds,
         elapsed_seconds: started.elapsed().as_secs_f64(),
         model_name: selected.name.clone(),
     })
+}
+
+/// Splits audio into chunks no longer than `max_seconds`, cutting each chunk at the quietest
+/// 100 ms window found after `min_seconds` so words are less likely to be split.
+fn chunk_ranges(
+    samples: &[f32],
+    sample_rate: usize,
+    min_seconds: usize,
+    max_seconds: usize,
+) -> Vec<Range<usize>> {
+    let sample_rate = sample_rate.max(1);
+    let max_len = (max_seconds * sample_rate).max(1);
+    let min_len = (min_seconds * sample_rate).min(max_len);
+    let window = (sample_rate / 10).max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while samples.len() - start > max_len {
+        let search_end = start + max_len;
+        let mut cut = search_end;
+        let mut quietest = f32::INFINITY;
+        let mut position = start + min_len;
+        while position + window <= search_end {
+            let energy: f32 = samples[position..position + window]
+                .iter()
+                .map(|sample| sample * sample)
+                .sum();
+            if energy <= quietest {
+                quietest = energy;
+                cut = position + window / 2;
+            }
+            position += window;
+        }
+        ranges.push(start..cut);
+        start = cut;
+    }
+    if start < samples.len() {
+        ranges.push(start..samples.len());
+    }
+    ranges
 }
 
 struct TempFile(PathBuf);
@@ -1186,5 +1253,38 @@ struct TempFile(PathBuf);
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_ranges;
+
+    #[test]
+    fn short_audio_is_a_single_chunk() {
+        let samples = vec![0.5_f32; 10 * 100];
+        assert_eq!(chunk_ranges(&samples, 100, 20, 28), vec![0..1000]);
+        assert!(chunk_ranges(&[], 100, 20, 28).is_empty());
+    }
+
+    #[test]
+    fn long_audio_is_split_into_contiguous_chunks_within_the_limit() {
+        let samples = vec![0.5_f32; 95 * 100];
+        let ranges = chunk_ranges(&samples, 100, 20, 28);
+        assert!(ranges.len() >= 4);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, samples.len());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+        assert!(ranges.iter().all(|range| range.len() <= 28 * 100 && !range.is_empty()));
+    }
+
+    #[test]
+    fn chunks_are_cut_at_the_quietest_point() {
+        let mut samples = vec![0.5_f32; 60 * 100];
+        samples[2400..2410].fill(0.0);
+        let ranges = chunk_ranges(&samples, 100, 20, 28);
+        assert_eq!(ranges[0], 0..2405);
     }
 }

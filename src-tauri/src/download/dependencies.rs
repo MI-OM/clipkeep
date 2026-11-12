@@ -252,8 +252,12 @@ impl DependencyManager {
                     true,
                 )
             })?;
-            let is_stale_staging =
-                entry.file_name().to_string_lossy().starts_with(".staging-") && file_type.is_dir();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // `.invalid-*` folders hold installations quarantined during a repair; they are never
+            // used again, so remove them instead of leaving several hundred MB behind.
+            let is_stale_staging = (name.starts_with(".staging-") || name.starts_with(".invalid-"))
+                && file_type.is_dir();
             if is_stale_staging {
                 fs::remove_dir_all(entry.path()).map_err(|_| {
                     AppError::new(
@@ -880,8 +884,10 @@ mod tests {
     fn interrupted_staging_is_cleaned_without_removing_installed_versions() {
         let directory = std::env::temp_dir().join(format!("clipkeep-repair-{}", Uuid::new_v4()));
         let stale_staging = directory.join(".staging-interrupted");
+        let quarantined = directory.join(".invalid-previous-repair");
         let installed = directory.join("previous-version");
         fs::create_dir_all(&stale_staging).unwrap();
+        fs::create_dir_all(&quarantined).unwrap();
         fs::create_dir_all(&installed).unwrap();
         fs::write(stale_staging.join("partial.zip"), b"partial").unwrap();
         fs::write(installed.join("tool.exe"), b"preserve").unwrap();
@@ -890,6 +896,7 @@ mod tests {
             .cleanup_stale_staging()
             .unwrap();
         assert!(!stale_staging.exists());
+        assert!(!quarantined.exists());
         assert!(installed.join("tool.exe").exists());
         fs::remove_dir_all(directory).unwrap();
     }
